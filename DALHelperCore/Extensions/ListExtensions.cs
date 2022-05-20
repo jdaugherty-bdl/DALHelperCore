@@ -37,10 +37,5 @@ namespace DALHelperCore.Extensions
         {
             return BaseObjects.Select(x => x.GenerateDTO(IncludeProperties: IncludeProperties, ExcludeProperties: ExcludeProperties));
         }
-
-        public static string GetDalTable<T>(this T @this) where T : DALBaseModel
-        {
-            return typeof(T).GetCustomAttribute<DALTable>()?.TableName;
-        }
     }
 }

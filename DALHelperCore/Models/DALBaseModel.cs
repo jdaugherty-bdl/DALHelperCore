@@ -1,5 +1,6 @@
 ﻿using DALHelperCore.Extensions;
 using DALHelperCore.Interfaces.Attributes;
+using DALHelperCore.InternalClasses.Helpers.DataTransfer.Persistence;
 using MySql.Data.MySqlClient;
 using Newtonsoft.Json;
 using System;
@@ -15,19 +16,27 @@ namespace DALHelperCore.Models
 {
     public class DALBaseModel
     {
-        [DALProperty]
+        [DALResolvable(PrimaryKey: true, Autonumber: true, IsNullable: false)]
+        public long Id { get; set; }
+
+        [DALResolvable(IsNullable: false, DefaultValue: "1")]
         public bool Active { get; set; }
-        [DALProperty]
+
         [DALTransferProperty]
+        [DALResolvable(IsNullable: false, Unique: true)]
         public string InternalId { get; set; }
-        [DALProperty]
+
+        [DALResolvable(IsNullable: false, DefaultValue: "CURRENT_TIMESTAMP")]
         public DateTime CreateDate { get; set; }
-        [DALProperty]
+
+        [DALResolvable(IsNullable: false, DefaultValue: "CURRENT_TIMESTAMP")]
         public DateTime LastUpdated { get; set; }
 
+        /*
         // The regular expression search and replace strings to turn "CapitalCase" property names into "underscore_case" column names
         public static string UnderscoreSearchPattern => @"(?<!_|^|Internal)([A-Z])";
         public static string UnderscoreReplacePattern => @"_$1";
+        */
 
         /// <summary>
         /// Resets every property to its default value
@@ -57,14 +66,17 @@ namespace DALHelperCore.Models
             this.LastUpdated = FromModel?.LastUpdated ?? default;
         }
 
-        private static string ThisTypeName => typeof(DALBaseModel).Name;
-
         /// <summary>
         /// Creates an object and automatcially places data from a database row into it based on naming conventions.
         /// </summary>
         /// <param name="ModelData">Row of data from the database.</param>
         /// <param name="AlternateTableName">The alternate table name to search for in data results.</param>
         public DALBaseModel(DataRow ModelData, string AlternateTableName = null)
+        {
+            ResetWithData(ModelData, AlternateTableName: AlternateTableName);
+        }
+
+        public DALBaseModel ResetWithData(DataRow ModelData, string AlternateTableName = null)
         {
             var alternateTableName = AlternateTableName ?? GetType().Name;
 
@@ -80,9 +92,11 @@ namespace DALHelperCore.Models
                     underscoreName.Value.Item2.SetValue(this, GetValueData(underscoreName.Key, underscoreName.Value.Item2.PropertyType, ModelData));
 
                 // then do the alternate table names
-                if (ModelData.Table.Columns.Contains($"{underscoreName.Key}_{alternateTableName ?? ThisTypeName}") && !(ModelData[$"{underscoreName.Key}_{alternateTableName ?? ThisTypeName}"] is DBNull) && underscoreName.Value.Item2.SetMethod != null)
-                    underscoreName.Value.Item2.SetValue(this, GetValueData($"{underscoreName.Key}_{alternateTableName ?? ThisTypeName}", underscoreName.Value.Item2.PropertyType, ModelData));
+                if (ModelData.Table.Columns.Contains($"{underscoreName.Key}_{alternateTableName}") && !(ModelData[$"{underscoreName.Key}_{alternateTableName}"] is DBNull) && underscoreName.Value.Item2.SetMethod != null)
+                    underscoreName.Value.Item2.SetValue(this, GetValueData($"{underscoreName.Key}_{alternateTableName}", underscoreName.Value.Item2.PropertyType, ModelData));
             }
+
+            return this;
         }
 
         /// <summary>
@@ -122,36 +136,38 @@ namespace DALHelperCore.Models
         /// <summary>
         /// Gets the full info about the current object's properties, including the underscore names.
         /// </summary>
-        /// <param name="GetOnlyDbResolvables">Indicate to get only properties marked with the DALProperty attribute.</param>
+        /// <param name="GetOnlyDbResolvables">Indicate to get only properties marked with the DALResolvable attribute.</param>
         /// <returns>The full list of property info including underscore names.</returns>
         public List<KeyValuePair<string, Tuple<string, PropertyInfo>>> GetUnderscoreProperties(bool GetOnlyDbResolvables = true)
         {
-            return GetUnderscorePropertiesOfObject(this, GetOnlyDbResolvables);
+            return UnderscoreNamesHelper.ConvertPropertiesToUnderscoreNames(this.GetType(), GetOnlyDalResolvables: GetOnlyDbResolvables);
         }
 
+        /*
         /// <summary>
         /// Takes in an object and gets the full info about its properties, including the underscore names.
         /// </summary>
         /// <param name="TargetObject">The object to pull the properties from.</param>
-        /// <param name="GetOnlyDbResolvables">Indicate to get only properties marked with the DALProperty attribute.</param>
+        /// <param name="GetOnlyDbResolvables">Indicate to get only properties marked with the DALResolvable attribute.</param>
         /// <returns>The full list of property info including underscore names.</returns>
         public static List<KeyValuePair<string, Tuple<string, PropertyInfo>>> GetUnderscorePropertiesOfObject(object TargetObject, bool GetOnlyDbResolvables = true)
         {
-            //TODO: investigate whether it makes sense to look for the DALProperty attribute or to just attempt to convert all class properties
-            // get all properties marked with the DALProperty attribute
+            //TODO: investigate whether it makes sense to look for the DALResolvable attribute or to just attempt to convert all class properties
+            // get all properties marked with the DALResolvable attribute
             var convertableProperties = TargetObject
                 .GetType()
                 .GetProperties()
-                .Where(x => !GetOnlyDbResolvables || x.GetCustomAttributes(true).Any(y => new Type[] { typeof(DALProperty) }.Contains(y.GetType())))
+                .Where(x => !GetOnlyDbResolvables || x.GetCustomAttributes(true).Any(y => new Type[] { typeof(DALResolvable) }.Contains(y.GetType())))
                 .ToList();
 
             // get the underscore names of all properties
             var underscoreNames = convertableProperties
-                .ToDictionary(x => x.Name.StartsWith("InternalId") ? x.Name : Regex.Replace(x.Name, UnderscoreSearchPattern, UnderscoreReplacePattern), x => new Tuple<string, PropertyInfo>(x.Name, x))
+                .ToDictionary(x => x.Name.StartsWith("InternalId") ? x.Name : Regex.Replace(x.Name, UnderscoreNamesHelper.UppercaseSearchPattern, UnderscoreNamesHelper.ReplacePattern), x => new Tuple<string, PropertyInfo>(x.Name, x))
                 .ToList();
 
             return underscoreNames;
         }
+        */
 
         /// <summary>
         /// Writes the current object to the database using the table named in the DALTable attribute.
@@ -160,7 +176,7 @@ namespace DALHelperCore.Models
         /// <returns>The number of rows written to the database.</returns>
         public int WriteToDatabase(Enum ConnectionStringType)
         {
-            return DALHelper.BulkTableWrite(ConnectionStringType, this, ForceType: this.GetType());
+            return DataOutputOperations.BulkTableWrite(ConnectionStringType, this, ForceType: this.GetType());
         }
 
         /// <summary>
@@ -171,7 +187,7 @@ namespace DALHelperCore.Models
         /// <returns>The number of rows written to the database.</returns>
         public int WriteToDatabase(MySqlConnection ExistingConnection, MySqlTransaction SqlTransaction = null)
         {
-            return DALHelper.BulkTableWrite(ExistingConnection, this, SqlTransaction: SqlTransaction, ForceType: this.GetType());
+            return DataOutputOperations.BulkTableWrite(ExistingConnection, this, SqlTransaction: SqlTransaction, ForceType: this.GetType());
         }
 
         /// <summary>
@@ -181,7 +197,7 @@ namespace DALHelperCore.Models
         /// <param name="IncludeProperties">A list of properties to include in the DTO, even if they aren't marked with DALTransferProperty.</param>
         /// <param name="ExcludeProperties">A list of properties to exclude from the DTO, even if they are marked with DALTransferProperty.</param>
         /// <returns>A serializable object with only the requested properties included.</returns>
-        public dynamic GenerateDTO(IEnumerable<string> IncludeProperties = null, IEnumerable<string> ExcludeProperties = null)
+        public dynamic GenerateDTO(IEnumerable<string> IncludeProperties = null, IEnumerable<string> ExcludeProperties = null, string SourceObjectName = null)
         {
             var baseRef = this;
 
@@ -190,11 +206,22 @@ namespace DALHelperCore.Models
                 .FullName
                 .Split(new char[] { '.' }, StringSplitOptions.RemoveEmptyEntries);
 
+            var sourceObjectIterations = SourceObjectName
+                ?.Split(new char[] { '.' }, StringSplitOptions.RemoveEmptyEntries)
+                ??
+                Enumerable.Empty<string>();
+
             // get object properties, if any are DALBaseModels marked with DALTransferProperty then GenerateDTO() on those recursively, otherwise just return the value. if there are any IEnumerables, DTO each item in the enumerable.
             return (ExpandoObject)baseRef
                 .GetType()
                 .GetRuntimeProperties()
-                .Select(x => new KeyValuePair<PropertyInfo, IEnumerable<string>>(x, namespaceIterations.Select((y, index) => string.Join(".", namespaceIterations.Skip(index).Append(x.Name))).Append(x.Name)))
+                .Select(x => new KeyValuePair<PropertyInfo, IEnumerable<string>>(x, namespaceIterations
+                    .Select((y, index) => string.Join(".", namespaceIterations.Skip(index).Append(x.Name)))
+                    .Append(x.Name)
+                    .Concat(sourceObjectIterations
+                        .Select((y, index) => string.Join(".", sourceObjectIterations.Skip(index).Append(x.Name)))
+                        .Append(x.Name))
+                    .Where(y => !string.IsNullOrWhiteSpace(y))))
                 .Where(x => (x.Key.GetCustomAttribute<DALTransferProperty>() != null
                         || ((IncludeProperties?.Intersect(x.Value, StringComparer.InvariantCultureIgnoreCase)?.Count() ?? 0) > 0))
                     && !((ExcludeProperties?.Intersect(x.Value, StringComparer.InvariantCultureIgnoreCase).Count() ?? 0) > 0))
@@ -222,7 +249,7 @@ namespace DALHelperCore.Models
                             seed.Add(property.Name,
                                 ((IEnumerable<DALBaseModel>)property
                                     .GetValue(baseRef))
-                                    .Select(x => x.GenerateDTO(IncludeProperties: IncludeProperties, ExcludeProperties: ExcludeProperties)));
+                                    .Select(x => x.GenerateDTO(IncludeProperties: IncludeProperties, ExcludeProperties: ExcludeProperties, SourceObjectName: string.Join(".", new List<string> { SourceObjectName, property.Name }.Where(y => !string.IsNullOrWhiteSpace(y))))));
                         }
                         else
                         {
@@ -238,7 +265,7 @@ namespace DALHelperCore.Models
 
                             var fieldValue = property.GetValue(baseRef);
                             if ((hasTransfer ?? false) && isBaseModel)
-                                fieldValue = ((DALBaseModel)property.GetValue(baseRef))?.GenerateDTO(BaseRef: baseRef, IncludeProperties: IncludeProperties, ExcludeProperties: ExcludeProperties);
+                                fieldValue = ((DALBaseModel)property.GetValue(baseRef))?.GenerateDTO(BaseRef: baseRef, IncludeProperties: IncludeProperties, ExcludeProperties: ExcludeProperties, SourceObjectName: string.Join(".", new List<string> { SourceObjectName, property.Name }.Where(y => !string.IsNullOrWhiteSpace(y))));
 
                             seed.Add(property.Name, fieldValue);
                             */
@@ -254,7 +281,7 @@ namespace DALHelperCore.Models
                                 new Type[] { property.PropertyType }
                                     .FlattenTreeObject(x => string.IsNullOrWhiteSpace(x?.BaseType?.Name) ? null : new Type[] { x.BaseType })
                                     .Contains(typeof(DALBaseModel))
-                                ? ((DALBaseModel)property.GetValue(baseRef))?.GenerateDTO(IncludeProperties: IncludeProperties, ExcludeProperties: ExcludeProperties)
+                                ? ((DALBaseModel)property.GetValue(baseRef))?.GenerateDTO(IncludeProperties: IncludeProperties, ExcludeProperties: ExcludeProperties, SourceObjectName: string.Join(".", new List<string> { SourceObjectName, property.Name }.Where(y => !string.IsNullOrWhiteSpace(y))))
                                 : property.GetValue(baseRef));
                         }
                         return seed;

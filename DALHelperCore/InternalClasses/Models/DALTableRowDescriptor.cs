@@ -1,30 +1,31 @@
 ﻿using DALHelperCore.Interfaces.Attributes;
+using DALHelperCore.Models;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 
-namespace DALHelperCore.Models.Internal
+namespace DALHelperCore.InternalClasses.Models
 {
-    /// <summary>
-    /// This class is used to gather information about database tables and their columns to enable automatic bulk table writes.
-    /// </summary>
     internal class DALTableRowDescriptor : DALBaseModel
     {
-        [DALProperty]
+        [DALResolvable]
         public string Field { get; set; }
-        [DALProperty]
+        [DALResolvable]
         public string Type { get; set; }
-        [DALProperty]
+        [DALResolvable]
         public string Null { get; set; }
-        [DALProperty]
+        [DALResolvable]
         public string Key { get; set; }
-        [DALProperty]
+        [DALResolvable]
         public string Default { get; set; }
-        [DALProperty]
+        [DALResolvable]
         public string Extra { get; set; }
 
         public DALTableRowDescriptor() : base() { }
-        public DALTableRowDescriptor(DataRow TrackerRow, string AlternateTableName = null) : base(TrackerRow, AlternateTableName) { }
+        private static string ThisTypeName => typeof(DALTableRowDescriptor).Name;
+        public DALTableRowDescriptor(DataRow TrackerRow, string AlternateTableName = null) : base(TrackerRow, AlternateTableName ?? ThisTypeName) { }
     }
 }

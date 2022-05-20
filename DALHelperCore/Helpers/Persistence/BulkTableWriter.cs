@@ -1,4 +1,7 @@
-﻿using DALHelperCore.Models.Internal;
+﻿using DALHelperCore.Extensions;
+using DALHelperCore.InternalClasses.Helpers.DataTransfer;
+using DALHelperCore.InternalClasses.Models;
+using DALHelperCore.Models.Properties;
 using MySql.Data.MySqlClient;
 using System;
 using System.Collections.Generic;
@@ -20,12 +23,11 @@ namespace DALHelperCore.Helpers.Persistence
         private string TableName;
         private bool WriteWithTransaction; // awkward name here so we can use the nice name for the set method below
         private bool ShouldThrowException; // awkward name here so we can use the nice name for the set method below
-        private Dictionary<string, Tuple<MySqlDbType, int, string>> _tableColumns;
-        private Dictionary<string, Tuple<MySqlDbType, int, string>> TableColumns
-        {
-            get => _tableColumns = _tableColumns ?? new Dictionary<string, Tuple<MySqlDbType, int, string>>();
-            set { _tableColumns = value; }
-        }
+        private bool ShouldAllowUserVariables; // awkward name here so we can use the nice name for the set method below
+
+        private Dictionary<string, Tuple<MySqlDbType, int, string, string>> _tableColumns;
+        private Dictionary<string, Tuple<MySqlDbType, int, string, string>> TableColumns => _tableColumns = _tableColumns ?? new Dictionary<string, Tuple<MySqlDbType, int, string, string>>();
+
         private int BatchSize;
         private IEnumerable<T> SourceData;
         private MySqlTransaction SqlTransaction;
@@ -37,12 +39,17 @@ namespace DALHelperCore.Helpers.Persistence
         private readonly Dictionary<string, MySqlDbType> MySqlTypeConverter = new Dictionary<string, MySqlDbType>
         {
             { "bigint", MySqlDbType.Int64 },
+            { "bigint unsigned", MySqlDbType.UInt64 },
             { "char", MySqlDbType.VarChar },
             { "varchar", MySqlDbType.VarChar },
             { "smallint", MySqlDbType.Int16 },
+            { "smallint unsigned", MySqlDbType.UInt16 },
             { "mediumint", MySqlDbType.Int24 },
+            { "mediumint unsigned", MySqlDbType.UInt24 },
             { "int", MySqlDbType.Int32 },
+            { "int unsigned", MySqlDbType.UInt32 },
             { "tinyint", MySqlDbType.Int16 },
+            { "tinyint unsigned", MySqlDbType.UInt16 },
             { "bit", MySqlDbType.Bit },
             { "timestamp", MySqlDbType.Timestamp },
             { "datetime", MySqlDbType.DateTime },
@@ -52,6 +59,7 @@ namespace DALHelperCore.Helpers.Persistence
             { "float", MySqlDbType.Float },
             { "guid", MySqlDbType.Guid },
             { "text", MySqlDbType.Text },
+            { "longtext", MySqlDbType.LongText },
             { "time", MySqlDbType.Time },
             { "date", MySqlDbType.Date },
             { "json", MySqlDbType.JSON }
@@ -61,26 +69,27 @@ namespace DALHelperCore.Helpers.Persistence
         internal BulkTableWriter() { }
 
         // start with a connection string enum
-        internal BulkTableWriter(Enum ConfigConnectionString, string InsertQuery = null, bool UseTransaction = false, bool ThrowException = true, MySqlTransaction SqlTransaction = null)
+        internal BulkTableWriter(Enum ConfigConnectionString, string InsertQuery = null, bool ThrowException = true, bool UseTransaction = false, bool AllowUserVariables = false)
         {
             this.ConfigConnectionString = ConfigConnectionString;
 
-            CommonSetup(InsertQuery, UseTransaction, ThrowException, SqlTransaction);
+            CommonSetup(InsertQuery, UseTransaction, ThrowException, null, AllowUserVariables);
         }
 
         // start wtih an already opened connection
-        internal BulkTableWriter(MySqlConnection ExistingConnection, string InsertQuery = null, bool UseTransaction = false, bool ThrowException = true, MySqlTransaction SqlTransaction = null)
+        internal BulkTableWriter(MySqlConnection ExistingConnection, string InsertQuery = null, bool ThrowException = true, bool UseTransaction = false, MySqlTransaction SqlTransaction = null)
         {
             this.ExistingConnection = ExistingConnection;
 
-            CommonSetup(InsertQuery, UseTransaction, ThrowException, SqlTransaction);
+            CommonSetup(InsertQuery, UseTransaction, ThrowException, SqlTransaction, false);
         }
 
-        private void CommonSetup(string InsertQuery, bool UseTransaction, bool ThrowException, MySqlTransaction SqlTransaction)
+        private void CommonSetup(string InsertQuery, bool UseTransaction, bool ThrowException, MySqlTransaction SqlTransaction, bool AllowUserVariables)
         {
             this.InsertQuery = InsertQuery;
             this.WriteWithTransaction = UseTransaction;
             this.ShouldThrowException = ThrowException;
+            this.ShouldAllowUserVariables = AllowUserVariables;
             this.SqlTransaction = SqlTransaction;
 
             BatchSize = DEFAULT_BATCH_SIZE;
@@ -102,16 +111,30 @@ namespace DALHelperCore.Helpers.Persistence
         /// <returns>The number of rows affected by this bulk write.</returns>
         public int Write(Func<string, T, object> DataTableFunction)
         {
+            var sourceDataCount = SourceData?.Count() ?? 0;
+
+            if (sourceDataCount == 0)
+                return 0;
+
             PopulateColumnDetails();
 
-            CreateOutputDataTable(DataTableFunction);
+            var outputIterations = sourceDataCount <= BatchSize
+                ? 1
+                : sourceDataCount / BatchSize;
 
-            var recordsInserted = -1;
+            if (outputIterations * BatchSize < sourceDataCount)
+                outputIterations++;
 
-            if (ExistingConnection != null)
-                recordsInserted = DALHelper.DoDatabaseWork<int>(ExistingConnection, InsertQuery, CommonDatabaseWork, UseTransaction: WriteWithTransaction, ThrowException: ShouldThrowException, SqlTransaction: SqlTransaction);
-            else
-                recordsInserted = DALHelper.DoDatabaseWork<int>(ConfigConnectionString, InsertQuery, CommonDatabaseWork, UseTransaction: WriteWithTransaction, ThrowException: ShouldThrowException, SqlTransaction: SqlTransaction);
+            var recordsInserted = 0;
+            for (var i = 0; i < outputIterations; i++)
+            {
+                CreateOutputDataTable(DataTableFunction, i);
+
+                if (ExistingConnection != null)
+                    recordsInserted += DatabaseWorkHelper.DoDatabaseWork<int>(ExistingConnection, InsertQuery, CommonDatabaseWork, UseTransaction: WriteWithTransaction, ThrowException: ShouldThrowException, SqlTransaction: SqlTransaction);
+                else
+                    recordsInserted += DatabaseWorkHelper.DoDatabaseWork<int>(ConfigConnectionString, InsertQuery, CommonDatabaseWork, UseTransaction: WriteWithTransaction, ThrowException: ShouldThrowException, AllowUserVariables: ShouldAllowUserVariables);
+            }
 
             return recordsInserted;
         }
@@ -126,10 +149,11 @@ namespace DALHelperCore.Helpers.Persistence
             CommandObject.UpdatedRowSource = UpdateRowSource.None;
 
             // add all the parameters and point to the source table
-            foreach (var column in TableColumns)
-            {
-                CommandObject.Parameters.Add($"@{column.Key}", column.Value.Item1, column.Value.Item2, column.Key);
-            }
+            CommandObject
+                .Parameters
+                .AddRange(TableColumns
+                    .Select(x => new MySqlParameter($"@{x.Key}", x.Value.Item1, x.Value.Item2, x.Key))
+                    .ToArray());
 
             // Specify the number of records to be Inserted/Updated in one go. Default is 1.
             var adpt = new MySqlDataAdapter
@@ -155,7 +179,12 @@ namespace DALHelperCore.Helpers.Persistence
                     throw new ArgumentNullException("Error auto-populating Bulk Table Writer call: table name not defined");
 
                 // pull the table details from the database
-                var currentTableDetails = DALHelper.GetDataObjects<DALTableRowDescriptor>(ConfigConnectionString, $"DESCRIBE {TableName}");
+                var currentTableDetails = default(IEnumerable<DALTableRowDescriptor>);
+
+                if (ExistingConnection != null)
+                    currentTableDetails = ObjectResultsHelper.GetDataObjects<DALTableRowDescriptor>(ExistingConnection, $"DESCRIBE {TableName}");
+                else
+                    currentTableDetails = ObjectResultsHelper.GetDataObjects<DALTableRowDescriptor>(ConfigConnectionString, $"DESCRIBE {TableName}");
 
                 // use all column for insert EXCEPT autonumber fields and the boilerplate create_date and last_updated columns
                 var insertColumns = currentTableDetails
@@ -178,7 +207,7 @@ namespace DALHelperCore.Helpers.Persistence
                     newQuery.Append(string.Join(",", insertColumns.Select(x => $"@{x.Field}")));
                     newQuery.Append(") ");
                     newQuery.Append("ON DUPLICATE KEY UPDATE ");
-                    newQuery.Append(string.Join(",", updateColumns.Select(x => $"`{x.Field}` = VALUES(`{x.Field}`)")));
+                    newQuery.Append(string.Join(",", insertColumns.Where(x => !x.Key.Contains("PRI") && !x.Key.Contains("UNI")).Select(x => $"`{x.Field}` = VALUES(`{x.Field}`)"))); // don't update primary key or unique columns on duplicate key as it's unnecessary
                     newQuery.Append(";");
 
                     SetInsertQuery(newQuery.ToString());
@@ -202,15 +231,18 @@ namespace DALHelperCore.Helpers.Persistence
                                 fieldType = typeParts[0];
 
                                 // if there's no size or the size is unparseable, just use -1 when inserting data
-                                if (!int.TryParse(typeParts[1], out fieldSize))
-                                    fieldSize = -1;
+                                fieldSize = int.TryParse(typeParts[1], out int sizeField) ? sizeField : -1;
                             }
 
+                            var convertedType = new DALPropertyType(fieldType);
+
                             // we don't already have this conversion defined, throw exception
-                            if (!MySqlTypeConverter.ContainsKey(fieldType))
+                            //if (!MySqlTypeConverter.ContainsKey(fieldType))
+                            if (convertedType.PropertyType == null)
                                 throw new KeyNotFoundException($"Error auto-populating columns for [{TableName}]: Invalid field type [{fieldType}]");
 
-                            return new Tuple<string, MySqlDbType, int, string>(x.Field, MySqlTypeConverter[fieldType], fieldSize, null);
+                            //return new Tuple<string, MySqlDbType, int, string, string>(x.Field, MySqlTypeConverter[fieldType], fieldSize, null, x.Default);
+                            return new Tuple<string, MySqlDbType, int, string, string>(x.Field, convertedType.PropertyMySqlDbType, fieldSize, null, x.Default);
                         });
 
                     // add all those columns to the output table
@@ -224,20 +256,17 @@ namespace DALHelperCore.Helpers.Persistence
         /// </summary>
         /// <param name="DataTableFunction">The data conversion function to use, or null to use the automatic conversions.</param>
         /// <returns>A fully populated output data table.</returns>
-        private DataTable CreateOutputDataTable(Func<string, T, object> DataTableFunction)
+        private DataTable CreateOutputDataTable(Func<string, T, object> DataTableFunction, int IterationCount)
         {
             // make a new table
             OutputTable = new DataTable();
             OutputTable.Clear();
 
             // add the columns
-            foreach (var column in TableColumns)
-            {
-                OutputTable.Columns.Add(column.Key);
-            }
+            OutputTable.Columns.AddRange(TableColumns.Select(x => new DataColumn(x.Key)).ToArray());
 
             // add the rows
-            foreach (var data in SourceData)
+            foreach (var data in SourceData.Skip(IterationCount * BatchSize).Take(BatchSize))
             {
                 OutputTable.Rows.Add(CreateOutputDataRow(OutputTable, data, DataTableFunction));
             }
@@ -259,6 +288,7 @@ namespace DALHelperCore.Helpers.Persistence
             // if there is no data conversion function specified, auto generate
             if (DataTableFunction == null)
             {
+                /*
                 // get all potential properties that can be converted to data
                 var convertableProperties = RowData
                     .GetType()
@@ -272,6 +302,8 @@ namespace DALHelperCore.Helpers.Persistence
                 var underscoreProperties = convertableProperties
                     .ToDictionary(x => x.Name.StartsWith("InternalId") ? x.Name : Regex.Replace(x.Name, uppercaseSearchPattern, replacePattern), x => new Tuple<string, PropertyInfo>(x.Name, x))
                     .ToList();
+                */
+                var underscoreProperties = RowData.ConvertPropertiesToUnderscoreNames();
 
                 // autoresolve object properties here
 
@@ -279,7 +311,7 @@ namespace DALHelperCore.Helpers.Persistence
                 foreach (var tableColumn in TableColumns)
                 {
                     // check if AlternatePropertyName is a property on this object
-                    var alternateUnderscoreName = tableColumn.Value.Item3 == null ? null : Regex.Replace(tableColumn.Value.Item3, uppercaseSearchPattern, replacePattern);
+                    var alternateUnderscoreName = tableColumn.Value.Item3 == null ? null : Regex.Replace(tableColumn.Value.Item3, UnderscoreNamesHelper.UppercaseSearchPattern, UnderscoreNamesHelper.ReplacePattern);
 
                     var underscoreProperty = (KeyValuePair<string, Tuple<string, PropertyInfo>>?)null;
 
@@ -343,7 +375,7 @@ namespace DALHelperCore.Helpers.Persistence
                     else
                     {
                         // if can't find property, just return null
-                        newRow[tableColumn.Key] = null;
+                        newRow[tableColumn.Key] = tableColumn.Value.Item4;
                     }
                 }
             }
@@ -395,6 +427,13 @@ namespace DALHelperCore.Helpers.Persistence
             return this;
         }
 
+        public BulkTableWriter<T> AllowUserVariables(bool AllowUserVariables)
+        {
+            this.ShouldAllowUserVariables = AllowUserVariables;
+
+            return this;
+        }
+
         /// <summary>
         /// Provide a custom insert query.
         /// </summary>
@@ -439,9 +478,9 @@ namespace DALHelperCore.Helpers.Persistence
         /// <param name="Size">Size in bytes of the column.</param>
         /// <param name="AlternatePropertyName">Optional alternate property to correlate with this column.</param>
         /// <returns>Itself</returns>
-        public BulkTableWriter<T> AddColumn(string ColumnName, MySqlDbType DbType, int Size, string AlternatePropertyName = null)
+        public BulkTableWriter<T> AddColumn(string ColumnName, MySqlDbType DbType, int Size, string AlternatePropertyName = null, string ColumnDefault = null)
         {
-            TableColumns.Add(ColumnName, new Tuple<MySqlDbType, int, string>(DbType, Size, AlternatePropertyName));
+            TableColumns.Add(ColumnName, new Tuple<MySqlDbType, int, string, string>(DbType, Size, AlternatePropertyName, ColumnDefault));
 
             return this;
         }
@@ -451,14 +490,14 @@ namespace DALHelperCore.Helpers.Persistence
         /// </summary>
         /// <param name="Columns">The list of columns using the specified structure: Tuple(ColumnName, MySqlDbType, ColumnSize, AlternateColumnName).</param>
         /// <returns>Itself</returns>
-        public BulkTableWriter<T> AddColumns(IEnumerable<Tuple<string, MySqlDbType, int, string>> Columns)
+        public BulkTableWriter<T> AddColumns(IEnumerable<Tuple<string, MySqlDbType, int, string, string>> Columns)
         {
-            TableColumns = TableColumns
+            _tableColumns = TableColumns
                 .Concat(Columns?
                     .Where(x => x?.Item2 != null)
-                    .ToDictionary(x => x.Item1, x => new Tuple<MySqlDbType, int, string>(x.Item2, x.Item3, x.Item4))
+                    .ToDictionary(x => x.Item1, x => new Tuple<MySqlDbType, int, string, string>(x.Item2, x.Item3, x.Item4, x.Item5))
                     ??
-                    new Dictionary<string, Tuple<MySqlDbType, int, string>>())
+                    new Dictionary<string, Tuple<MySqlDbType, int, string, string>>())
                 .ToDictionary(x => x.Key, x => x.Value);
 
             return this;
@@ -471,7 +510,7 @@ namespace DALHelperCore.Helpers.Persistence
         /// <returns>Itself</returns>
         public BulkTableWriter<T> AddColumns(IEnumerable<Tuple<string, MySqlDbType, int>> Columns)
         {
-            return AddColumns(Columns.Select(x => new Tuple<string, MySqlDbType, int, string>(x.Item1, x.Item2, x.Item3, null)));
+            return AddColumns(Columns.Select(x => new Tuple<string, MySqlDbType, int, string, string>(x.Item1, x.Item2, x.Item3, null, null)));
         }
 
         /// <summary>
